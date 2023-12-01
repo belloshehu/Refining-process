@@ -5,11 +5,33 @@
 */
 
 #include "max6675.h"
-#include "level.h"
 #include "customCharacters.h"
-#include <LCD_I2C.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include "DistilledProduct.h"
+#include "level.h"
+#include "utils.h"
 
-LCD_I2C lcd(0x27);
+
+// valve config:
+byte naphthaValvePin = 14;
+byte dieselValvePin = 15;
+byte keroValvePin = 16;
+byte residueValvePin = 17;
+byte lastIndex = 0;
+// time values
+unsigned long dischargeDuration = 120000;  //2*60*1000 (2 minutes)
+unsigned short tempMargin = 2; // margin between each temperature range
+
+// create instances of DistilledProduct to represent
+// products being distilled
+
+DistilledProduct naphtha("Naphtha", 40, 55, naphTank, naphthaValvePin); // real Values: lower = 40, upper = 170
+DistilledProduct kerosene("Kerosene", 57, 70, keroTank, keroValvePin); // real Values: lower = 170, upper = 250
+DistilledProduct diesel("Diesel", 72, 85, agoTank, dieselValvePin); // real Values: lower = 250, upper = 350
+DistilledProduct residue("Residue", 87, 100, bitTank, residueValvePin); // real Values: lower = 350, upper = beyond 350
+
+LiquidCrystal_I2C lcd(0x27, 20, 4);
 
 int thermoDO = 5;
 int thermoCS = 6;
@@ -17,84 +39,77 @@ int thermoCLK = 7;
 
 MAX6675 thermocouple(thermoCLK, thermoCS, thermoDO);
 
-// valve config:
-byte naphthaValvePin = 0;
-byte dieselValvePin = 1;
-byte keroValvePin = 2;
-byte residueValvePin = 3;
-
 // start/stop buttons
-byte startButtonPin = 11;
-byte stopButtonPin = 12;
+byte startButtonPin = 12;
+byte stopButtonPin = 13;
 
 // column span 
-byte colSpan = 4; 
+byte colSpan = 5; 
+bool entryFlag = false;
+bool firstIteration = false;
 
-byte buzzerPin = 8;
+byte buzzerPin = 4;
 
-#define products[] {"Kero", "Naphtha", "Diesel", "Bitumen"}
-// temperature set points:
-#define keroLowTemp 0 //kerosine lower temperature
-#define keroHighTemp 0 //kerosine upper temperature
-
-#define dieselLowTemp 0 //diesel lower temperature
-#define dieselHighTemp 0 //diesel upper temperature
-
-#define naphthaLowTemp 0 //naphtha lower temperature
-#define naphthaHighTemp 0 //naphtha upper temperature
-
-#define residueLowTemp 0 //residue lower temperature
-#define residueHighTemp 0 //residue upper temperature
-
-// flags: for indicating various states in the process
-bool started = false;
+DistilledProduct prod[4] = {naphtha, kerosene, diesel, residue};
+//#define productTitles[] {"Naphtha", "Kero", "Diesel", "Residue"}
 
 String lastProductName = "";
 
 void setup() {
   // put your setup code here, to run once:
-  lcd.begin(0X27);
+  // configure pins
+
+  kerosene.configureValvePin();
+  naphtha.configureValvePin();
+  diesel.configureValvePin();
+  residue.configureValvePin();
+  
+//  lcd.backlight();
+  lcd.init();
   lcd.backlight();
   lcd.setCursor(0,0);
-  lcd.print("   WELCOME   ");
+  lcd.print("PTI Crude oil");
   lcd.setCursor(0, 1); // Or setting the cursor in the desired position.
-  lcd.print("Crude refining");
-  lcd.setCursor(0, 2); // Or setting the cursor in the desired position.
-  lcd.print("system");
+  lcd.print("Batch Distillation");
+  lcd.setCursor(7, 2); // Or setting the cursor in the desired position.
+  lcd.print("Process");
 
-  // create the customi characters
+  // create the custom/icons characters
   lcd.createChar(0, openIcon);
   lcd.createChar(1, closeIcon);
   lcd.createChar(2, downArrow);
+  lcd.createChar(3, degreeIcon);
   
-  pinMode(naphthaValvePin, OUTPUT);
-  pinMode(dieselValvePin, OUTPUT);
-  pinMode(keroValvePin, OUTPUT);
-  pinMode(residueValvePin, OUTPUT);
+  for(byte i = 0; i < 4; i++){
+      pinMode(prod[i].getValvePin(), OUTPUT);
+    }
   
   pinMode(buzzerPin, OUTPUT);
   pinMode(startButtonPin, INPUT);
   pinMode(stopButtonPin, INPUT);
-}
+  
+  onOffBeep(buzzerPin, 2);
+  // clear display
+  delay(4000);
+  lcd.clear();
 
-float readTemperatureValue(){
-//  float temperatureValue = thermocouple.readCelsius();
-//  return temperatureValue;
+  // run tests
+  //  tests();
+  //  delay(2000);
+  //  lcd.clear();
+  
 }
 
 void closeAllValves(){
-  digitalWrite(dieselValvePin, LOW);
-  digitalWrite(keroValvePin, LOW);
-  digitalWrite(naphthaValvePin, LOW);
-  digitalWrite(residueValvePin, LOW);
+  // Turns all valve off
+  for(byte i = 0; i < sizeof(prod); i++){
+      prod[i].closeValve();
+    }
   }
 
-void openValve(byte valvePin){
-   closeAllValves();
-   digitalWrite(valvePin, HIGH);
-  }
 
-/*
+void displayDistillingProduct(DistilledProduct &product){
+  /*
  * Displays the product being distilled on the first and second row
  * 
  * args:
@@ -105,30 +120,87 @@ void openValve(byte valvePin){
  * returns: none
  *  
 */
-void displayDistillingProduct(String productName, unsigned short level, unsigned short temp){
-  
-  String productText = productName;
+  String productText = product.getTitle();
 
   // row 1 text
   productText += " ";
   productText += "at";
   productText += " ";
-  productText += String(temp);
+  productText += String(formatValue(thermocouple.readCelsius(), 3));
   lcd.setCursor(0, 0);
   lcd.print(productText);
-  // display open icon
-  lcd.setCursor(19, 0);
-  lcd.write(0);
+  // display degree icon
+  lcd.setCursor(productText.length(), 0);
+  lcd.write(3);
+  lcd.setCursor(productText.length()+1, 0);
+  lcd.print("C");
   
   //row 2 text:
   String productText2 = "";
-  productText2 += level;
-  productText2 += " ";
-  productText2 += "litres";
-  lcd.setCursor(1, 0);
-  lcd.print(productText2);
-  }
+  productText2 += String(formatValue(product.getAverageLevel(10), 3));
+//  productText2 += " ";
+//  productText2 += "%";
+
+  // display open icon 
+  lcd.setCursor(0, 1);
+  lcd.write(0);
   
+  lcd.setCursor(14, 1);
+  lcd.print(productText2);
+
+  lcd.setCursor(17, 1);
+  lcd.print("%");
+  }
+
+
+void displayResidueDischarge(DistilledProduct &product, unsigned long timeElapsed){
+  /*
+ * Displays residue when discharging. 
+ * 
+ * args:
+ *  product object reference
+ *  
+ * returns: none
+ *  
+*/
+  String productText = product.getTitle();
+
+  // row 1 text
+  productText += " ";
+  productText += "discharging";
+  lcd.setCursor(0, 0);
+  lcd.print(productText);
+  
+  productText = "at";
+  productText += " ";
+  productText += String(formatValue(thermocouple.readCelsius(), 3));
+  lcd.setCursor(0, 1);
+  lcd.print(productText);
+
+  // degree icon
+  lcd.setCursor(productText.length() + 1, 1);
+  lcd.write(3);
+  lcd.setCursor(productText.length()+2, 1);  
+  lcd.print("C");
+  //row 2 text:
+  // display open icon 
+  lcd.setCursor(18, 1);
+  lcd.write(0);
+
+
+  lcd.setCursor(0, 2);
+  lcd.print("Please wait ....");
+  lcd.setCursor(0, 3);
+  // time is converted from milli second to minute. 
+  // there 60 * 1000 milli seconds in a minute
+  String timingText = String(timeElapsed / 1000);
+  timingText += " of ";
+  timingText += String(dischargeDuration / 1000);
+  timingText += " secs (";
+  timingText += String(dischargeDuration / 60000);
+  timingText += " mins)";
+  lcd.print(timingText);
+  }
 
 /*
  
@@ -148,122 +220,141 @@ void displayDistillingProduct(String productName, unsigned short level, unsigned
   | 000| 000 | 000 | 000 |
    ----------------------
 */  
+void displayNormal(){
+  // Displays the process temperature when no product is being distilled
+  
+  String text = "Temperature: " + formatValue(thermocouple.readCelsius(), 3);
+  lcd.setCursor(0, 1);
+  lcd.print(text);
+  
+  lcd.setCursor(text.length(), 1);
+  lcd.write(3);
+  
+  lcd.setCursor(text.length() + 1, 1);
+  lcd.print("C");
+}
 
-
-void displayProduct(String valveState, unsigned short level, String productName){
+void displayProduct(DistilledProduct &product, byte pos){
   byte colNumber;
-  if(lastProductName != productName){
-      lcd.clear();
-    }
-  if(productName.equalsIgnoreCase("D")){
-    colNumber = 0; // place DPK in row 1
-    }
-  else if(productName.equalsIgnoreCase("A")){
-    colNumber = 1* colSpan; // place AGO in row 2
-    }
-  else if(productName.equalsIgnoreCase("N")){
-    colNumber = 2 * colSpan; // place napthalene in row 3
-    }
-  else if(productName.equalsIgnoreCase("B")){
-     colNumber = 3 * colSpan; // place Bitumen in row 1
-   }
- 
-    lcd.setCursor(colNumber + 20, 0);
-    lcd.print(productName);
-    lcd.setCursor(productName.length() + 20, 0); // place icon after product name 
-    if(valveState.equalsIgnoreCase("open")){
+  String productName = product.getTitle();
+    colNumber = pos * colSpan;
+    lcd.setCursor(colNumber, 2);
+    lcd.print(product.getTitle()[0]);
+   
+    if(product.getValveState().equalsIgnoreCase("open")){
+      lcd.setCursor(colNumber + 3, 2); // place open icon after product name 
       lcd.write(0);
+      lcd.setCursor(colNumber + 2, 2); // place down arrow icon after product name 
       lcd.write(2);
       }else{
+       lcd.setCursor(colNumber + 3, 2); // place close icon after product name 
        lcd.write(1);
      }
-
+    lcd.setCursor(colNumber+4, 2);
+    lcd.print("|");
+     
     // print level on the last row
-    lcd.setCursor(colNumber+ 20, 1);
-    lcd.print(String(level) + " |");
+    lcd.setCursor(colNumber, 3);
+    lcd.print(formatValue(product.getLevel(), 3));
+    lcd.setCursor(colNumber + 4, 3);
+    lcd.print("|");
     
     lastProductName = productName;
 }
 
-/*
-  Displays non distiling products
-*/
-void nonDistillingProducts(String product1, String product2, String product3){
-  // Ago
-        unsigned short agoLevel = averageLevel(agoTank, 10);
-        displayProduct("close", agoLevel, "Ago" );
-
-        // Naphtha
-        unsigned short naphthaLevel = averageLevel(naphTank, 10);
-        displayProduct("close", naphthaLevel, "Naphtha" );
-
-        // Bitumen
-        unsigned short bitLevel = averageLevel(bitTank, 10);
-        displayProduct("close", bitLevel, "Bitumen" );
- }
  
-void process(){
+byte process(){
   float tempVal = thermocouple.readCelsius();
+  firstIteration = false;
   unsigned short level = 0;
+  byte distillingIndex = 0; // index of the product distilling
+  
   // when process is started
-  if(started){
-      
-      if((tempVal <= keroHighTemp) && (tempVal >= keroLowTemp) ){
-        // open valve for kero if temperature is with the range
-        openValve(keroValvePin);  
-        level = averageLevel(keroTank, 10);
-        
-        displayDistillingProduct("Kerosine", level, tempVal );
-        
-        // display non distilling products
-
-      }
-        
-      if((tempVal <= dieselHighTemp) && (tempVal >= dieselLowTemp) ){
-        // open valve for diesel if temperature is with the range
-        openValve(dieselValvePin);
-        level = averageLevel(agoTank, 10);  
-        displayProduct("open", level, "Diesel");
+ 
+  lcd.setCursor(0, 0);
+  lcd.print("Refining stopped..");
+  displayNormal();
+  for(byte index=0; index < 4; index++){
+        displayProduct(prod[index], index);
+        prod[index].closeValve();
+   }
+  bool started = onOff(buttonPressCount(startButtonPin, 0));
+  while(started == true){    
+    // clear LCD on first iteration:
+    if(firstIteration == false){
+      lcd.setCursor(0, 0);
+      lcd.print("Refining started..");
+      onOffBeep(buzzerPin, 3);
+      lcd.clear();
+      firstIteration = true;
+     }
+     
+    tempVal = thermocouple.readCelsius();
+    bool found = false; // indicates if distilling product is found
+    
+    // loop through all products and display each 
+    for(byte index=0; index < 4; index++){
+      uint16_t productLowerTemp = prod[index].getLowerTemp();
+      uint16_t productUpperTemp = prod[index].getUpperTemp();
+      if((tempVal >= productLowerTemp) && (tempVal <= productUpperTemp) && index < 3){
+         // clear screen when in new range
+        if(lastIndex != index){
+          lcd.clear();
+          delay(1500);
+         }
+        displayDistillingProduct(prod[index]);
+        prod[index].openValve();
+        found = true;
+        distillingIndex = index; 
+        lastIndex = index;
+      }else if((tempVal >= productLowerTemp) && index == 3){ 
+        // wait till discharge time;
+        lcd.clear();
+        unsigned long dischargeStartTime = millis();
+        unsigned long timeElapsed = 0;
+        while(((millis() - dischargeStartTime) <= dischargeDuration) && index == 3){
+          displayResidueDischarge(prod[index], timeElapsed);
+          prod[index].openValve();
+          found = true;
+          distillingIndex = index;
+          timeElapsed = millis() - dischargeStartTime;  
+          } 
+          
+          // indicate that process is completed
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("Process Completed...");
+          delay(2000); 
+          lcd.clear(); 
+          started = onOff(buttonPressCount(startButtonPin, 1));
+          return 0; 
         }
-
-      if((tempVal <= naphthaHighTemp) && (tempVal >= naphthaLowTemp) ){
-        // open valve for naphtha if temperature is with the range
-        openValve(naphthaValvePin); 
-        level = averageLevel(naphTank, 10); 
-        displayProduct("open", level, "Naphtha");
-        }
-
-      if((tempVal <= residueHighTemp) && (tempVal >= residueLowTemp)){
-        // open valve for residue if temperature is with the range
-        openValve(residueValvePin);  
-        level = averageLevel(bitTank, 10);
-        displayProduct("open", level, "Residue");
-        }
         
-       else{
-          // no product matches temperature range
-          closeAllValves();
-          //displayProcess(temp, "none", "none");
-        }
     }
-    else{
-      return;
+
+    // close all valve 
+    for(byte index=0; index < 4; index++){
+        displayProduct(prod[index], index);
+        if(index != distillingIndex){
+          prod[index].closeValve();
+         }
+      }
+      
+    if(found == false){
+      displayNormal();
+      delay(1000);
+      }
+    started = onOff(buttonPressCount(startButtonPin, 0));
+    if(started == false){
+      onOffBeep(buzzerPin, 1);
      }
   }
+  delay(2000);
+  lcd.clear();
+ }
 
 
 void loop() {
   // put your main code here, to run repeatedly:
- if(digitalRead(startButtonPin) == LOW){
-    delay(150);
-    started = true;
-  }
- if(digitalRead(stopButtonPin) == LOW){
-    delay(150);
-    started = false;
-  }
-
-  process();
+  process();  
 }
-
-
