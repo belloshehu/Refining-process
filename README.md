@@ -25,7 +25,7 @@ Follow the following steps:
 Your code will be merged if it is ok, otherwise you will be required to make
 neccessary changes.
 
-## Note:
+##### Note:
 
 To contribute to this project, go through the circuit diagram to understand how
 the micro-controller is connected with other circuit components.
